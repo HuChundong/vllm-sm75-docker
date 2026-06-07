@@ -44,16 +44,32 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     curl -sS https://bootstrap.pypa.io/get-pip.py | python${PY}
 
 ENV CUDA_HOME=/usr/local/cuda
-ENV PATH=/usr/local/cuda/bin:/usr/lib/ccache:${PATH}
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH=/usr/local/cargo/bin:/usr/local/cuda/bin:/usr/lib/ccache:${PATH}
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 ENV MAX_JOBS=24 CCACHE_DIR=/root/.cache/ccache CMAKE_BUILD_TYPE=Release
 
+# Rust toolchain for vLLM's Rust frontend (vllm-rs), via rsproxy.cn (China mirror).
+ENV RUSTUP_DIST_SERVER=https://rsproxy.cn RUSTUP_UPDATE_ROOT=https://rsproxy.cn/rustup
+RUN curl --proto '=https' --tlsv1.2 -sSf https://rsproxy.cn/rustup-init.sh | sh -s -- -y \
+      --default-toolchain stable --profile minimal && \
+    printf '[source.crates-io]\nreplace-with = "rsproxy-sparse"\n[source.rsproxy-sparse]\nregistry = "sparse+https://rsproxy.cn/index/"\n[net]\ngit-fetch-with-cli = true\n' \
+      > ${CARGO_HOME}/config.toml && \
+    cargo --version
+
 # Torch first (pinned, cu128) so the vLLM build links against the right ABI.
+# Build against torch +cu128 so it matches the base image's nvcc 12.8 (the kernels
+# compile cleanly, exactly like the validated host build whose version tag is
+# "cu128"). The runtime stage then installs torch's default CUDA 13 build, which
+# is what production actually runs on (built-with-12.8, runs-on-13 — same as host).
+# Build requirements mirror vLLM's pyproject [build-system].requires because the
+# wheel is built with --no-isolation (deps are NOT auto-installed).
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --index-url ${TORCH_INDEX} \
-      torch==${TORCH_VERSION} && \
+    python3 -m pip install --index-url ${TORCH_INDEX} torch==${TORCH_VERSION} && \
     python3 -m pip install -i ${PIP_INDEX} \
-      "setuptools>=77" "setuptools-scm>=8" wheel ninja cmake "packaging>=24" build
+      "cmake>=3.26.1" ninja "packaging>=24.2" \
+      "setuptools>=77.0.3,<81.0.0" "setuptools-scm>=8.0" "setuptools-rust>=1.9.0" \
+      wheel jinja2 numpy build
 
 # Fetch the SM75 fork at the pinned ref.
 WORKDIR /src
@@ -64,6 +80,8 @@ WORKDIR /src/vllm
 # sm75 CMake patches in the fork, which keeps this build fast.
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/vllm/rust/target \
     VLLM_TARGET_DEVICE=cuda \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     python3 -m build --wheel --no-isolation -o /wheels && \
@@ -83,24 +101,28 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
       software-properties-common ca-certificates git curl ninja-build \
       libnuma1 libibverbs1 && \
     add-apt-repository -y ppa:deadsnakes/ppa && apt-get update && \
-    apt-get install -y --no-install-recommends python${PY} python${PY}-dev && \
-    update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PY} 1 && \
-    curl -sS https://bootstrap.pypa.io/get-pip.py | python${PY} && \
+    apt-get install -y --no-install-recommends \
+      python${PY} python${PY}-dev python${PY}-venv && \
     rm -rf /var/lib/apt/lists/*
 
+# Use an isolated venv so pip never collides with apt-managed packages in the
+# shared /usr/lib/python3/dist-packages (e.g. python3-jwt without a pip RECORD).
+RUN python${PY} -m venv /opt/venv
 ENV CUDA_HOME=/usr/local/cuda
-ENV PATH=/usr/local/cuda/bin:${PATH}
-
-# Torch (pinned) + flashinfer JIT runtime.
+ENV PATH=/opt/venv/bin:/usr/local/cuda/bin:${PATH}
 RUN --mount=type=cache,target=/root/.cache/pip \
-    python3 -m pip install --index-url ${TORCH_INDEX} torch==${TORCH_VERSION} && \
-    python3 -m pip install -i ${PIP_INDEX} \
+    pip install -i ${PIP_INDEX} --upgrade pip setuptools wheel
+
+# Torch (pinned, CUDA 13 build from default index) + flashinfer JIT runtime.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -i ${PIP_INDEX} \
+      torch==${TORCH_VERSION} \
       flashinfer-python==${FLASHINFER_VERSION} flashinfer-cubin==${FLASHINFER_VERSION}
 
 # Install the vLLM wheel (pulls remaining runtime deps from the mirror).
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,from=builder,source=/wheels,target=/wheels \
-    python3 -m pip install -i ${PIP_INDEX} /wheels/*.whl
+    pip install -i ${PIP_INDEX} /wheels/*.whl
 
 # Apply the SM75 shared-memory (EBO) fix to flashinfer 0.6.12 headers so the
 # head_dim=256 prefill kernels fit the 64 KiB opt-in smem cap on Turing.
@@ -123,5 +145,5 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     HF_HOME=/root/.cache/huggingface
 
 EXPOSE 8000
-ENTRYPOINT ["python3", "-m", "vllm.entrypoints.openai.api_server"]
+ENTRYPOINT ["/opt/venv/bin/python3", "-m", "vllm.entrypoints.openai.api_server"]
 CMD ["--help"]

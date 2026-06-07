@@ -24,21 +24,18 @@
    union {
      struct {
        alignas(16) DTypeQ q_smem[CTA_TILE_Q * HEAD_DIM_QK];
-@@ -107,17 +120,24 @@
+@@ -107,14 +120,24 @@
      };
      alignas(16) DTypeO smem_o[CTA_TILE_Q * HEAD_DIM_VO];
    };
 -  // Scale factors for NVFP4 KV cache: one UE4M3 byte per NVFP4_SF_VEC_SIZE elements.
--  // SM75 fix: zero-length (0 bytes) when DTypeKV is not FP4. With head_dim 256 the
--  // q/k/v union already fills exactly 64KB; the previous uint8_t[1] placeholders added
--  // 32 bytes of alignas(16) padding, pushing smem to 65568 > Turing's 65536 opt-in cap
--  // and making cudaFuncSetAttribute fail with cudaErrorInvalidValue ("invalid argument").
+-  // Sized to 1 when DTypeKV is not FP4 to avoid wasting shared memory.
 -  alignas(16) std::conditional_t<is_fp4_type_v<DTypeKV>,
 -                                 uint8_t[CTA_TILE_KV * HEAD_DIM_QK / NVFP4_SF_VEC_SIZE],
--                                 uint8_t[0]> k_sf_smem;
+-                                 uint8_t[1]> k_sf_smem;
 -  alignas(16) std::conditional_t<is_fp4_type_v<DTypeKV>,
 -                                 uint8_t[CTA_TILE_KV * HEAD_DIM_VO / NVFP4_SF_VEC_SIZE],
--                                 uint8_t[0]> v_sf_smem;
+-                                 uint8_t[1]> v_sf_smem;
 +  // Accessors for the empty-base scale-factor buffers above: return the buffer when present
 +  // (FP4), else nullptr. The result is only dereferenced inside the matching
 +  // `if constexpr (is_fp4_type_v<DTypeKV>)` branch, and the offset is folded in here so it is
@@ -60,7 +57,7 @@
  };
  
  template <MaskMode MASK_MODE_, uint32_t CTA_TILE_Q_, uint32_t NUM_MMA_Q_, uint32_t NUM_MMA_KV_,
-@@ -483,7 +503,7 @@
+@@ -480,7 +503,7 @@
    constexpr uint32_t THREADS_PER_CTA = NUM_WARPS * 32;
    constexpr uint32_t NUM_SF_ITERS = (SF_TOTAL_BYTES / 4 + THREADS_PER_CTA - 1) / THREADS_PER_CTA;
  
@@ -69,7 +66,7 @@
    const uint32_t thread_id = warp_idx * 32 + lane_idx;
  
  #pragma unroll
-@@ -564,7 +584,7 @@
+@@ -561,7 +584,7 @@
    constexpr uint32_t THREADS_PER_CTA = NUM_WARPS * 32;
    constexpr uint32_t NUM_SF_ITERS = (SF_TOTAL_BYTES / 4 + THREADS_PER_CTA - 1) / THREADS_PER_CTA;
  
@@ -78,7 +75,7 @@
    const uint32_t thread_id = warp_idx * 32 + lane_idx;
    const uint32_t sf_stride_n = kv_stride_n / SF_CONTAINERS;
    const uint32_t sf_stride_h = kv_stride_h / SF_CONTAINERS;
-@@ -1778,9 +1798,9 @@
+@@ -1775,9 +1798,9 @@
  
        // compute attention score
        compute_qk<KTraits>(&qo_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r,
@@ -90,7 +87,7 @@
                            lane_idx, s_frag);
        uint32_t kv_idx_base =
            chunk_start + (iter * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16;
-@@ -1808,9 +1828,9 @@
+@@ -1805,9 +1828,9 @@
  
        // compute sfm*v
        compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r,
@@ -102,7 +99,7 @@
                               lane_idx, s_frag, o_frag, d);
  
        block.sync();
-@@ -2247,9 +2267,9 @@
+@@ -2244,9 +2267,9 @@
  
        // compute attention score
        compute_qk<KTraits>(&qo_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r,
@@ -114,7 +111,7 @@
                            lane_idx, s_frag);
        uint32_t kv_idx_base =
            chunk_start + (iter * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16;
-@@ -2278,9 +2298,9 @@
+@@ -2275,9 +2298,9 @@
  
        // compute sfm*v
        compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r,
@@ -126,7 +123,7 @@
                               lane_idx, s_frag, o_frag, d);
  
        block.sync();
-@@ -2646,9 +2666,9 @@
+@@ -2643,9 +2666,9 @@
  
        // compute attention score
        compute_qk<KTraits>(&qo_smem, &q_smem_offset_r, &k_smem, &k_smem_offset_r,
@@ -138,7 +135,7 @@
                            lane_idx, s_frag);
        uint32_t kv_idx_base =
            chunk_start + (iter * NUM_WARPS_KV + get_warp_idx_kv<KTraits>(tid.z)) * NUM_MMA_KV * 16;
-@@ -2703,9 +2723,9 @@
+@@ -2700,9 +2723,9 @@
  
        // compute sfm*v
        compute_sfm_v<KTraits>(&v_smem, &v_smem_offset_r,
