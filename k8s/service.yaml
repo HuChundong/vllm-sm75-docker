@@ -13,4 +13,4 @@ spec:
     - name: http
       port: 8000          # in-cluster: vllm-qwen3.vllm.svc:8000
       targetPort: 8000
-      nodePort: 30832     # external: http://<node-ip>:30832
+      nodePort: 30800     # external: http://<node-ip>:30800

@@ -22,6 +22,8 @@ ARG TORCH_VERSION=2.11.0
 ARG FLASHINFER_VERSION=0.6.12
 ARG VLLM_REPO=https://github.com/HuChundong/vllm.git
 ARG VLLM_REF=sm75-upstream-main
+ARG FLASHQLA_REPO=https://github.com/HuChundong/FlashQLA-SM70-SM75.git
+ARG FLASHQLA_REF=sm70-sm75-gdn-forward
 ARG TORCH_CUDA_ARCH_LIST=7.5
 
 # ---------------------------------------------------------------------------
@@ -92,6 +94,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # ---------------------------------------------------------------------------
 FROM nvidia/cuda:${CUDA_TAG} AS runtime
 ARG PY PIP_INDEX TORCH_INDEX TORCH_VERSION FLASHINFER_VERSION TORCH_CUDA_ARCH_LIST
+ARG FLASHQLA_REPO FLASHQLA_REF
 ENV DEBIAN_FRONTEND=noninteractive
 
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -123,6 +126,15 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 RUN --mount=type=cache,target=/root/.cache/pip \
     --mount=type=bind,from=builder,source=/wheels,target=/wheels \
     pip install -i ${PIP_INDEX} /wheels/*.whl
+
+# FlashQLA (flashqla_legacy GDN prefill backend for SM70/SM75). Pure-Python wheel
+# whose gdn_forward.cu is JIT-compiled at runtime via torch.utils.cpp_extension
+# (needs pybind11 + nvcc + ninja, all present). Installed editable so the bundled
+# .cu source stays on disk for that runtime build.
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -i ${PIP_INDEX} pybind11 && \
+    git clone --depth 1 --branch ${FLASHQLA_REF} ${FLASHQLA_REPO} /opt/flash_qla && \
+    pip install -i ${PIP_INDEX} -e /opt/flash_qla
 
 # Apply the SM75 shared-memory (EBO) fix to flashinfer 0.6.12 headers so the
 # head_dim=256 prefill kernels fit the 64 KiB opt-in smem cap on Turing.

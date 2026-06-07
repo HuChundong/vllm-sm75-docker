@@ -18,6 +18,9 @@ spec:
         app: vllm-qwen3
     spec:
       # The whole 4x2080Ti box is one node; the device plugin schedules here.
+      # runtimeClassName: nvidia is required for k3s to inject the NVIDIA driver
+      # into the container (without it CUDA is invisible -> "Failed to infer device").
+      runtimeClassName: nvidia
       restartPolicy: Always
       containers:
         - name: vllm
@@ -42,11 +45,11 @@ spec:
             - --disable-custom-all-reduce
             - --mamba-cache-mode=align
             - --mamba-block-size=8
-            - --limit-mm-per-prompt={"video": 0}
+            - '--limit-mm-per-prompt={"video": 0}'
             - --mm-encoder-attn-backend=TORCH_SDPA
             - --skip-mm-profiling
-            - --additional-config={"gdn_prefill_backend":"flashqla_legacy"}
-            - --speculative-config={"method":"mtp","num_speculative_tokens":3}
+            - '--additional-config={"gdn_prefill_backend":"flashqla_legacy"}'
+            - '--speculative-config={"method":"mtp","num_speculative_tokens":3}'
             - --enable-auto-tool-choice
             - --tool-call-parser=qwen3_coder
             - --reasoning-parser=qwen3
