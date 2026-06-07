@@ -1,0 +1,6 @@
+.git
+.gitignore
+k8s
+scripts
+README.md
+*.md

@@ -1,0 +1,105 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: vllm-qwen3
+  namespace: vllm
+  labels:
+    app: vllm-qwen3
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single GPU pool: never run two pods at once
+  selector:
+    matchLabels:
+      app: vllm-qwen3
+  template:
+    metadata:
+      labels:
+        app: vllm-qwen3
+    spec:
+      # The whole 4x2080Ti box is one node; the device plugin schedules here.
+      restartPolicy: Always
+      containers:
+        - name: vllm
+          image: vllm-sm75:latest
+          imagePullPolicy: Never        # image is imported into k3s, no registry
+          ports:
+            - name: http
+              containerPort: 8000
+          args:
+            - --model=/models/Qwen3.6-27B-AWQ
+            - --served-model-name=Qwen3.6-27B-AWQ
+            - --host=0.0.0.0
+            - --port=8000
+            - --api-key=abc123
+            - --tensor-parallel-size=2
+            - --data-parallel-size=2
+            - --quantization=awq_marlin
+            - --dtype=float16
+            - --generation-config=vllm
+            - --enable-chunked-prefill
+            - --enable-prefix-caching
+            - --disable-custom-all-reduce
+            - --mamba-cache-mode=align
+            - --mamba-block-size=8
+            - --limit-mm-per-prompt={"video": 0}
+            - --mm-encoder-attn-backend=TORCH_SDPA
+            - --skip-mm-profiling
+            - --additional-config={"gdn_prefill_backend":"flashqla_legacy"}
+            - --speculative-config={"method":"mtp","num_speculative_tokens":3}
+            - --enable-auto-tool-choice
+            - --tool-call-parser=qwen3_coder
+            - --reasoning-parser=qwen3
+            - --max-model-len=204800
+            - --max-num-batched-tokens=8192
+            - --max-num-seqs=2
+            - --gpu-memory-utilization=0.86
+            - --cudagraph-capture-sizes=4
+          env:
+            - name: CUDA_VISIBLE_DEVICES
+              value: "0,1,2,3"
+          resources:
+            limits:
+              nvidia.com/gpu: "4"
+            requests:
+              cpu: "8"
+              memory: 32Gi
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: cache
+              mountPath: /root/.cache
+            - name: dshm
+              mountPath: /dev/shm
+          startupProbe:                  # model load + first-time JIT can be slow
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 180        # up to 30 min before giving up
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 30
+            failureThreshold: 6
+      volumes:
+        - name: models
+          hostPath:
+            path: /home/hucd/models
+            type: Directory
+        - name: cache               # persists HF + flashinfer/torch JIT caches
+          hostPath:
+            path: /home/hucd/.cache/k8s-vllm
+            type: DirectoryOrCreate
+        - name: dshm                # NCCL / multiprocessing need a big /dev/shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 16Gi
